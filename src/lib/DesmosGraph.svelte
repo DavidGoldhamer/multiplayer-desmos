@@ -321,7 +321,7 @@
 
 <svelte:head>
     <script 
-        src="/desmos.js"
+        src="https://www.desmos.com/api/v1.8/calculator.js?apiKey=dcb31709b452b1cf9dc26972add0fda6"
         on:load={start}
     ></script>
 </svelte:head>
