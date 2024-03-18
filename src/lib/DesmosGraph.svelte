@@ -47,7 +47,7 @@
         inviteLink = `${window.location.toString().split("?")[0]}?id=${roomId}`;
         
         const provider = new WebrtcProvider(`desmos-${roomId}`, ydoc, {
-            signaling: [ "wss://yrs-signal.shuttleapp.rs/signaling" ]
+            signaling: [ "wss://yrs-signal-2.shuttleapp.rs/signaling" ]
         });
 
         provider.awareness.setLocalStateField("user", localMeta);
@@ -321,7 +321,7 @@
 
 <svelte:head>
     <script 
-        src="https://www.desmos.com/api/v1.8/calculator.js?apiKey=dcb31709b452b1cf9dc26972add0fda6"
+        src="/desmos.js"
         on:load={start}
     ></script>
 </svelte:head>
