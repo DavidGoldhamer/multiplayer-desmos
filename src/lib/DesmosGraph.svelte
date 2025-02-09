@@ -1,9 +1,6 @@
 <script lang="ts">
 
-    // TODO:
-    // - Allow annotatons
-    // - Style button link
-    
+    // Original Code
     import * as Y from 'yjs';
     import { WebrtcProvider } from 'y-webrtc';
     import { writable } from 'svelte/store';
@@ -11,6 +8,7 @@
     import Invite from '$lib/Invite.svelte';
     import PersonIcon from '$lib/PersonIcon.svelte';
     import { makeId, createUserMetadata, areExpressionsEqual } from '$lib/util/helper';
+    import { SvelteComponentTyped } from "svelte";
 
     type UserMetadata = ReturnType<typeof createUserMetadata>;
 
@@ -36,18 +34,19 @@
     };
 
     let remoteMousePositions = writable<RemoteMouse[]>([]);
+    let lastModifiedBy = writable<Record<string, string>>({});
 
     const start = () => {
-
         const ydoc = new Y.Doc();
-
         const urlSearchParams = new URLSearchParams(location.search);
         const roomId = urlSearchParams.has("id") ? urlSearchParams.get("id") : makeId(6);
+        window.ydoc = ydoc; // Add this immediately after const ydoc = new Y.Doc();
+        console.log('Connected to room:', roomId);
 
         inviteLink = `${window.location.toString().split("?")[0]}?id=${roomId}`;
-        
+
         const provider = new WebrtcProvider(`desmos-${roomId}`, ydoc, {
-            signaling: [ "wss://yrs-signal-2.shuttleapp.rs/signaling" ]
+            signaling: ['ws://localhost:4444']
         });
 
         provider.awareness.setLocalStateField("user", localMeta);
@@ -59,7 +58,15 @@
         provider.connect();
 
         provider.awareness.on('change', () => {
+            console.log('Awareness states changed:', Array.from(provider.awareness.getStates().values()));
+        });
 
+        provider.on('status', (status) => {
+            console.log('WebRTC Status:', status);
+        });
+
+
+        provider.awareness.on('change', () => {
             const users = Array.from(provider.awareness.getStates().values()) as {
                 user: UserMetadata,
                 "mouse-x": number,
@@ -68,7 +75,6 @@
             }[];
 
             nameStore.update(_ => users.map(u => u.user).slice(1) as UserMetadata[]);
-
             remoteMousePositions.update(_ => users.map(u => ({
                 x: u["mouse-x"],
                 y: u["mouse-y"],
@@ -77,10 +83,31 @@
                 color: u["user"]["colorGroup"]["color"],
                 highlight: u["user"]["colorGroup"]["light"]
             })));           
-        
         });
         
         const yarr = ydoc.getArray<ExpressionState>("equations");
+       
+        yarr.observe(() => {
+            let syncedExpressions = yarr.toArray();
+            console.log('Yjs Array Updated:', syncedExpressions);
+            calculator.setExpressions(syncedExpressions);
+        });
+
+
+        let pastExpressions: Desmos.ExpressionState[];
+        setInterval(() => {
+            const expressions = calculator.getExpressions();
+            console.log('Current Desmos Expressions:', expressions);
+            if (!areExpressionsEqual(expressions, pastExpressions)) {
+                pastExpressions = expressions;
+                ydoc.transact(() => {
+                    console.log('Inserting into Yjs Array:', expressions);
+                    yarr.delete(0, yarr.length);
+                    yarr.insert(0, expressions);
+                });
+            }
+        }, 1000);
+
         const userSelections = ydoc.getMap<number>("selections");
         const userSelectionNodes = new Map<string, HTMLElement>();
 
@@ -133,6 +160,7 @@
             }
         });
 
+
         calculator = Desmos.GraphingCalculator(divEle, {
             autosize: true,
             images: false,
@@ -141,10 +169,6 @@
             trace: true
         });
 
-        /** 
-         * @todo: figure out how to do this outside of setTimeout.
-         *        We need to wait for the DOM to reload
-         */
         setTimeout(() => {
             grapherDivEle = divEle.getElementsByClassName("dcg-grapher").item(0) as HTMLDivElement;
             grapherDivEle.addEventListener("mouseenter", () => {;
@@ -168,125 +192,104 @@
                 provider.awareness.setLocalStateField("mouse-y", mathPos.y);
             });
         }, 100);
+    };
+    // New Code for Save, Load, and Delete Functionality
+    let graphName = '';
+    let savedGraphs: string[] = [];
+    let selectedGraph = '';
+    let isSaved = writable(true);
 
-        // !!!
-        // Here, we fix the Desmos bug: "expression with id [id] already exists"
-        // by removing the event listeners
-        // According to stackoverflow the only way is to
-        // replace the element with a clone of itself
-        // https://stackoverflow.com/questions/4386300/javascript-dom-how-to-remove-all-event-listeners-of-a-dom-object
-        {
-            let newExprDiv: HTMLDivElement = document.getElementsByClassName("dcg-new-math-div").item(0) as HTMLDivElement;
+    async function saveGraph() {
+        if (!graphName.trim()) {
+            alert('Please enter a graph name.');
+            return;
+        }
+        const state = calculator.getState();
+        const response = await fetch('http://localhost:5555/api/graphs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: graphName, data: state }),
+        });
+        const result = await response.json();
+        if (response.ok) {
+            alert(result.message);
+            isSaved.set(true);
+            fetchSavedGraphs();
+        } else {
+            alert('Failed to save the graph.');
+        }
+    }
 
-            // TypeScript doesn't like that cloneNode returns a "Node"
-            // @ts-ignore
-            newExprDiv.replaceWith((newExprDiv=newExprDiv.cloneNode(true)));
-
-            // Add new event listener to manually add an expression
-            newExprDiv.onclick = () => {
-                // ... probably should just look at how many expressions exist already
-                let newId = Math.random() * 10000 | 0;
-                
-                calculator.setExpression({
-                    id: newId.toString(),
-                    type: "expression",
-                    latex: " " // <-- add a space to not count the cell as "empty"
-                               //     The space doesn't display on Desmos so
-                               // the user interface remains the same
-                });
-                // Select last expression
-                setTimeout(() => {
-                    // IMPORTANT: I'm using setTimeout here so the
-                    // DOM has a change to update
-                    // The 
-                    let allExpressions = Array.from(document.getElementsByClassName("dcg-mathitem")) as HTMLDivElement[];
-                    let lastExpression = allExpressions.at(-1);
-                    if (lastExpression) {
-
-                        // We have to focus the textarea
-                        // because trying to .click() or .focus()
-                        // the div itself does nothing
-                        let ta = lastExpression.getElementsByTagName("textarea").item(0);
-                        ta?.focus();
-                    }
-                }, 50); // <-- consider changing to a larger time...
-                        // or somehow waiting for the document to sync
-            }
+    async function loadGraph() {
+        if (!selectedGraph) {
+            alert('Please select a graph to load.');
+            return;
         }
 
-        // calculator.observe("selectedExpressionId", console.log);
-
-        let pastExpressions = calculator.getExpressions();
-
-        yarr.observe(() => {
-
-            let newExpressions = yarr.toArray();
-            let curExpressions = calculator.getExpressions();
-
-            if (areExpressionsEqual(pastExpressions, newExpressions)) {
-                return;
-            }
-
-            // delete removed expressions
-            calculator.removeExpressions(curExpressions.filter(u => {
-                return !newExpressions.find(v => v.id == u.id);
-            }).map(e => {
-                console.log("Removing ", e.id);
-                return { id: e.id as string };
-            }));
-
-            newExpressions.forEach(newExpression => {
-                calculator.setExpression(newExpression);
-            });
-            
-            // go through each expression:
-            let currentExpressions = calculator.getExpressions();
-            let shouldReorder = newExpressions.some((expr, index) => {
-                return currentExpressions[index].id != expr.id
-            });
-
-            // only if we need to re-order
-            // so far this is the only way I've found
-            // since Desmos API doesn't care about order
-            if (shouldReorder) {
-                console.log("Reordering...");
-                calculator.setBlank({ allowUndo: true });
-                calculator.setExpressions(newExpressions);
-            }
-
-            // update cache
-            pastExpressions = newExpressions;
+        const response = await fetch(`http://localhost:5555/api/graphs?name=${selectedGraph}`, {
+            method: 'GET',
         });
 
-        function getSelectedIndex() {
-            const allEquations = Array.from(document.getElementsByClassName("dcg-expressionitem"));
-            const selected = allEquations.findIndex(div => div.classList.contains("dcg-selected"));            
-            return selected;
-        }
+        if (response.ok) {
+            const graphs = await response.json();
+            console.log('Graph data received:', graphs);
 
+            const graph = graphs.find(g => g.name === selectedGraph);
 
-        setInterval(() => {
-            let selected = getSelectedIndex();
-            let lastIndex = userSelections.get(localMeta.userId);
-            if (lastIndex != selected) userSelections.set(localMeta.userId, selected);
-        }, 1000 / 10);
-
-        setInterval(() => {
-            let newExpressions = calculator.getExpressions();
-
-            if (!areExpressionsEqual(newExpressions, pastExpressions)) {
-                // encode document as single update
-                // TODO: ensure that the transaction only
-                // encodes the differences
-                pastExpressions = newExpressions;
-                ydoc.transact(() => {
-                    yarr.delete(0, yarr.length);
-                    yarr.insert(0, newExpressions);
-                });
+            if (graph && graph.data) {
+                calculator.setState(graph.data);
+                isSaved.set(true);
+            } else {
+                alert('Invalid graph data received.');
             }
-
-        }, 1000 / POLL_HZ);
+        } else {
+            alert(`Failed to load the graph "${selectedGraph}".`);
+        }
     }
+
+    async function fetchSavedGraphs() {
+        const response = await fetch('http://localhost:5555/api/graphs');
+        if (response.ok) {
+            savedGraphs = await response.json();
+        } else {
+            alert('Failed to fetch saved graphs.');
+        }
+    }
+
+    async function deleteGraph() {
+        if (!selectedGraph) {
+            alert('Please select a graph to delete.');
+            return;
+        }
+        if (!confirm(`Are you sure you want to delete "${selectedGraph}"?`)) return;
+
+        const response = await fetch(`http://localhost:5555/api/graphs?name=${selectedGraph}`, {
+            method: 'DELETE',
+        });
+        const result = await response.json();
+        if (response.ok) {
+            alert(result.message);
+            fetchSavedGraphs();
+        } else {
+            alert('Failed to delete the graph.');
+        }
+    }
+
+    // Fetch saved graphs when the component is initialized
+    fetchSavedGraphs();
+
+
+
+    let showMenu = writable(false); // State to track menu visibility
+    let showMenuValue;
+    showMenuValue = showMenu; // Reactive statement to get the value of showMenu
+
+    const toggleMenu = () => {
+        showMenu.update((visible) => !visible); // Toggle the visibility
+        fetchSavedGraphs(); // Fetch saved graphs when the menu is opened
+    };
+
+
 
     let sizeCache = new Map<string, number>();
     function mathToCSSTransform(coord: RemoteMouse) {
@@ -317,32 +320,32 @@
 
         return `translate(${x}px, ${y}px) scale(${s}%)`;
     }
+
+
 </script>
 
 <svelte:head>
-    <script 
+    <script
         src="https://www.desmos.com/api/v1.8/calculator.js?apiKey=dcb31709b452b1cf9dc26972add0fda6"
         on:load={start}
     ></script>
 </svelte:head>
 
-<div class="
-    overflow-hidden w-screen h-screen absolute 
-    grid grid-cols-1 grid-rows-[auto_1fr]
-">
+<div
+    class="overflow-hidden w-screen h-screen absolute grid grid-cols-1 grid-rows-[auto_1fr]"
+>
     <!-- Top bar -->
-    <div class="
-        h-20 overflow-hidden row-span-1 p-0 
-        bg-gray-800 flex place-items-center pl-2
-    ">
+    <div
+        class="h-20 overflow-hidden row-span-1 p-0 bg-gray-800 flex place-items-center pl-2"
+    >
         <a href="/" target="_blank">
-            <img 
-                src="/icons8-desmos-200.png" 
-                class="h-20 m-0" 
+            <img
+                src="/icons8-desmos-200.png"
+                class="h-20 m-0"
                 alt="Desmos icon by Icons8"
-            >
+            />
         </a>
-        
+
         <!--
         <span 
             class="
@@ -354,59 +357,85 @@
             style:border-color="{localMeta.colorGroup.color}"
         />
         -->
-        
-        <PersonIcon color={localMeta.colorGroup.color}/>
 
-        <div
-            class="w-[0.2rem] h-8 bg-white mr-2 ml-2 rounded-full"
-        />
-
-        
+        <PersonIcon color={localMeta.colorGroup.color} />
+        <div class="w-[0.2rem] h-8 bg-white mr-2 ml-2 rounded-full" />
         {#each $nameStore as meta}
-            <!--
-            <span
-                class="
-                    w-16 h-16 p-0 mr-2 ml-2 
-                    bg-center bg-no-repeat bg-cover 
-                    rounded-full border-4
-                "
-                style:background-image="url({meta.imageUrl})"
-                style:border-color="{meta.colorGroup.color}"
-            />
-            -->
-            <PersonIcon color={meta.colorGroup.color}/>
+            <PersonIcon color={meta.colorGroup.color} />
         {/each}
-
-        <Invite url={inviteLink}/>        
-
+        <Invite url={inviteLink} />
     </div>
 
-    <!-- Desmos graph container -->
-    <div
-        class="row-span-1 w-full h-full"
-        bind:this={divEle}
-    />
-
+    <!-- Graph Container -->
+    <div class="row-span-1 w-full h-full" bind:this={divEle}></div>
 </div>
 
-<div 
-    class="absolute right-2 bottom-2 text-gray-700 text-sm"
->
-    <a 
-        class="text-green-600"
-        target="_blank" 
-        href="https://icons8.com/icon/kFcdher8hXQj/desmos"
+<!-- Save, Load, and Delete Section -->
+<div class="absolute top-4 right-4 z-20">
+    <button
+        on:click={toggleMenu}
+        class="bg-blue-500 text-white p-3 rounded-full shadow-lg"
     >
-        Desmos
-    </a> 
-    icon by 
-    <a 
-        class="text-green-600"
-        target="_blank" 
-        href="https://icons8.com"
-    >
-        Icons8
-    </a>
+        ⚙️
+    </button>
+
+    {#if $showMenu}
+        <!-- Collapsible Menu -->
+        <div class="mt-2 bg-white shadow-lg rounded-lg p-4 w-64">
+            <input
+                type="text"
+                bind:value={graphName}
+                placeholder="Enter graph name"
+                class="border p-2 w-full rounded mb-2"
+            />
+            <button
+                on:click={saveGraph}
+                class="bg-green-500 text-white px-4 py-2 w-full rounded"
+            >
+                💾 Save
+            </button>
+            <div class="mt-4">
+                <select
+                    bind:value={selectedGraph}
+                    class="border p-2 w-full rounded mb-2"
+                >
+                    <option value="" disabled>Select a saved graph</option>
+                    {#each savedGraphs as graph}
+                        <option value={graph.name}>{graph.name}</option>
+                    {/each}
+                </select>
+                <button
+                    on:click={loadGraph}
+                    class="bg-blue-500 text-white px-4 py-2 w-full rounded mb-2"
+                >
+                    🔄 Load
+                </button>
+                <button
+                    on:click={deleteGraph}
+                    class="bg-red-500 text-white px-4 py-2 w-full rounded"
+                >
+                    🗑️ Delete
+                </button>
+            </div>
+            <div class="mt-2">
+                {#if isSaved}
+                    <p class="text-green-600">✔ All changes saved.</p>
+                {:else}
+                    <p class="text-red-600">⚠ Unsaved changes.</p>
+                {/if}
+            </div>
+        </div>
+    {/if}
+</div>
+
+<!-- Last Modified Info -->
+<div class="absolute bottom-4 right-4 bg-gray-200 p-2 rounded shadow-md">
+    <h4>Last Modified:</h4>
+    <ul>
+        {#each Object.entries($lastModifiedBy) as [id, user]}
+            <li>Expression {id}: {user}</li>
+        {/each}
+    </ul>
 </div>
 
 {#each $remoteMousePositions as pos}
@@ -414,8 +443,8 @@
         class="absolute top-0 left-0 w-8 h-8 pointer-events-none"
         style:transform={mathToCSSTransform(pos)}
     >
-        <polygon 
-            points="0,0 15,5 12,8 20,18 18,20 8,12 5,15" 
+        <polygon
+            points="0,0 15,5 12,8 20,18 18,20 8,12 5,15"
             fill={pos.color}
             stroke="black"
             stroke-width="2px"
@@ -425,34 +454,50 @@
 {/each}
 
 {#each $nameStore as meta}
-    <!--
-    <span 
-        class="
-            absolute right-4 top-1 w-12 h-12 p-0 mr-2 ml-5 
-            border-2 bg-no-repeat bg-center bg-cover rounded-full 
-            hidden pointer-events-none
-        "
+    <div
         id="icon-{meta.userId}"
-        style:background-image="url({meta.imageUrl})"
-        style:border-color="{meta.colorGroup.color}"
-    />
-    -->
-
-    <div id="icon-{meta.userId}" class="
-        hidden absolute right-7 top-1 pointer-events-none w-12 h-12 scale-75
-    ">
-        <PersonIcon 
-            color={meta.colorGroup.color} 
+        class="
+        hidden absolute right-7 top-1 pointer-events-none w-12 h-12 scale-75"
+    >
+        <PersonIcon
+            color={meta.colorGroup.color}
             bgColor="rgb(55 65 81)"
             outlineColor="rgb(107 114 128)"
         />
     </div>
 {/each}
 
-
 <style>
     :global(.dcg-graph-outer) {
-        cursor: none;
+        cursor: default;
+    }
+    .absolute {
+        z-index: 10;
+    }
+
+    .top-4 {
+        top: 1rem;
+    }
+
+    .right-4 {
+        right: 1rem;
+    }
+
+    .z-20 {
+        z-index: 20;
+    }
+
+    .shadow-lg {
+        box-shadow:
+            0 4px 6px rgba(0, 0, 0, 0.1),
+            0 1px 3px rgba(0, 0, 0, 0.06);
+    }
+
+    .rounded-full {
+        border-radius: 9999px;
+    }
+
+    .rounded-lg {
+        border-radius: 0.5rem;
     }
 </style>
-
